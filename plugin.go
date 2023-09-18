@@ -27,6 +27,7 @@ import (
 func InstallPlugin(config config.Plugin) *Plugin {
 	defaults.SetDefaults(config)
 	t := reflect.TypeOf(config).Elem()
+
 	name := strings.TrimSuffix(t.Name(), "Config")
 	plugin := &Plugin{
 		Name:   name,
@@ -49,6 +50,9 @@ func InstallPlugin(config config.Plugin) *Plugin {
 		Plugins[name] = plugin
 		plugins = append(plugins, plugin)
 	}
+
+	fmt.Printf("\nplugin: %#v\n", plugin)
+
 	return plugin
 }
 
@@ -96,6 +100,9 @@ func (opt *Plugin) handle(pattern string, handler http.Handler) {
 		opt.Debug("http handle added to engine", zap.String("pattern", pattern))
 		EngineConfig.Handle(pattern, opt.logHandler(pattern, handler))
 	}
+
+	opt.Sugar().Debugf("api list: %v", pattern)
+
 	apiList = append(apiList, pattern)
 }
 
@@ -150,6 +157,10 @@ func (opt *Plugin) assign() {
 			}
 		}
 	}
+
+	fmt.Println("------------------------------")
+	fmt.Printf("\nplugin name: %s\n", opt.Name)
+
 	opt.registerHandler()
 	opt.run()
 }
@@ -188,6 +199,7 @@ func (opt *Plugin) Update(conf config.Config) {
 func (opt *Plugin) registerHandler() {
 	t := reflect.TypeOf(opt.Config)
 	v := reflect.ValueOf(opt.Config)
+
 	// 注册http响应
 	for i, j := 0, t.NumMethod(); i < j; i++ {
 		name := t.Method(i).Name
@@ -197,6 +209,9 @@ func (opt *Plugin) registerHandler() {
 		}
 		switch handler := v.Method(i).Interface().(type) {
 		case func(http.ResponseWriter, *http.Request):
+
+			fmt.Printf("\n %d http router: %s\n", i+1, patten)
+
 			opt.handle(patten, http.HandlerFunc(handler))
 			// case func(*http.Request) (int, string, any):
 			// 	opt.handle(patten, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
@@ -279,7 +294,7 @@ func (opt *Plugin) SubscribeExist(streamPath string, sub ISubscriber) error {
 	}
 	return opt.Subscribe(streamPath, sub)
 }
-func (opt *Plugin) AssignSubConfig(suber  *Subscriber) {
+func (opt *Plugin) AssignSubConfig(suber *Subscriber) {
 	if suber.Config == nil {
 		conf, ok := opt.Config.(config.SubscribeConfig)
 		if !ok {
@@ -292,6 +307,7 @@ func (opt *Plugin) AssignSubConfig(suber  *Subscriber) {
 		suber.ID = fmt.Sprintf("%d", uintptr(unsafe.Pointer(suber)))
 	}
 }
+
 // Subscribe 订阅一个流，如果流不存在则创建一个等待流
 func (opt *Plugin) Subscribe(streamPath string, sub ISubscriber) error {
 	suber := sub.GetSubscriber()
