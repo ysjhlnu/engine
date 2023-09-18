@@ -102,10 +102,6 @@ type Media struct {
 	流速控制
 }
 
-func (av *Media) Dispose() {
-	av.Value.Broadcast()
-}
-
 func (av *Media) GetFromPool(b util.IBytes) (item *util.ListItem[util.Buffer]) {
 	if b.Reuse() {
 		item = av.BytesPool.Get(b.Len())
@@ -157,7 +153,7 @@ func (av *Media) SetStuff(stuff ...any) {
 		case IStream:
 			pubConf := v.GetPublisherConfig()
 			av.Base.SetStuff(v)
-			av.Init(pubConf.RingSize, NewAVFrame)
+			av.Init(256, NewAVFrame)
 			av.SSRC = uint32(uintptr(unsafe.Pointer(av)))
 			av.等待上限 = pubConf.SpeedLimit
 		case uint32:

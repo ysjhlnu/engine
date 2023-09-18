@@ -156,9 +156,9 @@ func (io *IO) receive(streamPath string, specific IIO) error {
 	u, err := url.Parse(streamPath)
 	if err != nil {
 		if EngineConfig.LogLang == "zh" {
-			io.Error("接收流路径(流唯一标识)格式错误,必须形如 live/test ", zap.String("流路径", streamPath), zap.Error(err))
+			log.Error("接收流路径(流唯一标识)格式错误,必须形如 live/test ", zap.String("流路径", streamPath), zap.Error(err))
 		} else {
-			io.Error("receive streamPath wrong format", zap.String("streamPath", streamPath), zap.Error(err))
+			log.Error("receive streamPath wrong format", zap.String("streamPath", streamPath), zap.Error(err))
 		}
 		return err
 	}
@@ -167,35 +167,37 @@ func (io *IO) receive(streamPath string, specific IIO) error {
 	if v, ok := specific.(ISubscriber); ok {
 		wt = v.GetSubscriber().Config.WaitTimeout
 	}
-	io.Context, io.CancelFunc = context.WithCancel(util.Conditoinal[context.Context](io.Context == nil, Engine, io.Context))
 	s, create := findOrCreateStream(u.Path, wt)
 	if s == nil {
 		return ErrBadStreamName
 	}
+
+	if io.Stream == nil { //初次
+		io.Context, io.CancelFunc = context.WithCancel(util.Conditoinal[context.Context](io.Context == nil, Engine, io.Context))
+		if io.Type == "" {
+			io.Type = reflect.TypeOf(specific).Elem().Name()
+		}
+		logFeilds := []zapcore.Field{zap.String("type", io.Type)}
+		if io.ID != "" {
+			logFeilds = append(logFeilds, zap.String("ID", io.ID))
+		}
+		if io.Logger == nil {
+			io.Logger = s.With(logFeilds...)
+		} else {
+			logFeilds = append(logFeilds, zap.String("streamPath", s.Path))
+			io.Logger = io.Logger.With(logFeilds...)
+		}
+	}
 	io.Stream = s
 	io.Spesific = specific
 	io.StartTime = time.Now()
-	if io.Type == "" {
-		io.Type = reflect.TypeOf(specific).Elem().Name()
-	}
-	logFeilds := []zapcore.Field{zap.String("type", io.Type)}
-	if io.ID != "" {
-		logFeilds = append(logFeilds, zap.String("ID", io.ID))
-	}
-	if io.Logger == nil {
-		io.Logger = s.With(logFeilds...)
-	} else {
-		logFeilds = append(logFeilds, zap.String("streamPath", s.Path))
-		io.Logger = io.Logger.With(logFeilds...)
-	}
 	if v, ok := specific.(IPublisher); ok {
 		conf := v.GetPublisher().Config
-		io.Type = strings.TrimSuffix(io.Type, "Publisher")
 		io.Info("publish")
 		s.pubLocker.Lock()
 		defer s.pubLocker.Unlock()
 		oldPublisher := s.Publisher
-		if oldPublisher != nil && !oldPublisher.IsClosed() {
+		if oldPublisher != nil {
 			zot := zap.String("old type", oldPublisher.GetPublisher().Type)
 			if oldPublisher == specific { // 断线重连
 				s.Info("republish", zot)
@@ -241,7 +243,6 @@ func (io *IO) receive(streamPath string, specific IIO) error {
 		}
 	} else {
 		conf := specific.(ISubscriber).GetSubscriber().Config
-		io.Type = strings.TrimSuffix(io.Type, "Subscriber")
 		io.Info("subscribe")
 		if create {
 			EventBus <- InvitePublish{CreateEvent(s.Path)} // 通知发布者按需拉流
