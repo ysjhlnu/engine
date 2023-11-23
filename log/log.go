@@ -23,7 +23,7 @@ var engineConfig = zapcore.EncoderConfig{
 	MessageKey:     "M",
 	StacktraceKey:  "S",
 	LineEnding:     zapcore.DefaultLineEnding,
-	EncodeLevel:    zapcore.CapitalColorLevelEncoder,
+	EncodeLevel:    zapcore.CapitalLevelEncoder,
 	EncodeTime:     zapcore.TimeEncoderOfLayout("15:04:05"),
 	EncodeDuration: zapcore.StringDurationEncoder,
 	EncodeCaller:   zapcore.ShortCallerEncoder,
