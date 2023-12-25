@@ -41,6 +41,7 @@ func (config *HTTP) AddMiddleware(middleware Middleware) {
 	config.middlewares = append(config.middlewares, middleware)
 }
 
+// Handle 没有mux会创建然后把handler添加到自己的路由中去
 func (config *HTTP) Handle(path string, f http.Handler) {
 	if config.mux == nil {
 		config.mux = http.NewServeMux()

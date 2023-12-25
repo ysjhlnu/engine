@@ -24,6 +24,7 @@ type GlobalConfig struct {
 	config.Engine
 }
 
+// ServeHTTP 所有API接口
 func (conf *GlobalConfig) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/favicon.ico" {
 		http.ServeFile(rw, r, "favicon.ico")

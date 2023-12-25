@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"gorm.io/gorm"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -81,6 +80,7 @@ type Plugin struct {
 	Disabled           bool
 }
 
+// 中间件
 func (opt *Plugin) logHandler(pattern string, handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		opt.Debug("visit", zap.String("path", r.URL.String()), zap.String("remote", r.RemoteAddr))
@@ -93,13 +93,15 @@ func (opt *Plugin) handle(pattern string, handler http.Handler) {
 	if opt == nil {
 		return
 	}
+	// 判断每个插件的配置中是否有单独的HTTPConfig
 	conf, ok := opt.Config.(config.HTTPConfig)
 	if !strings.HasPrefix(pattern, "/") {
 		pattern = "/" + pattern
 	}
 	if ok {
+		// 插件有自己的HTTP监听,注册到自己监听的端口中去
 		opt.Debug("http handle added", zap.String("pattern", pattern))
-		conf.Handle(pattern, opt.logHandler(pattern, handler)) // 注册到自己监听的端口中去
+		conf.Handle(pattern, opt.logHandler(pattern, handler))
 	}
 	if opt != Engine {
 		pattern = "/" + strings.ToLower(opt.Name) + pattern
@@ -130,7 +132,7 @@ func (opt *Plugin) assign() {
 func (opt *Plugin) run() {
 	opt.Context, opt.CancelFunc = context.WithCancel(Engine)
 	opt.Config.OnEvent(FirstConfig(&opt.RawConfig))
-	opt.Debug("config", zap.Any("config", opt.Config))
+	//opt.Debug("config", zap.Any("config", opt.Config))
 	if conf, ok := opt.Config.(config.HTTPConfig); ok {
 		go conf.Listen(opt)
 	}
@@ -147,10 +149,10 @@ func (opt *Plugin) Update(conf *config.Config) {
 func (opt *Plugin) registerHandler() {
 	t := reflect.TypeOf(opt.Config)
 	v := reflect.ValueOf(opt.Config)
-	// 注册http响应
+	// 注册http响应,遍历方法名称
 	for i, j := 0, t.NumMethod(); i < j; i++ {
 		name := t.Method(i).Name
-		if name == "ServeHTTP" {
+		if name == "ServeHTTP" { // 跳过/路径
 			continue
 		}
 		switch handler := v.Method(i).Interface().(type) {
@@ -159,6 +161,7 @@ func (opt *Plugin) registerHandler() {
 			opt.handle(patten, http.HandlerFunc(handler))
 		}
 	}
+	// 注册/方法
 	if rootHandler, ok := opt.Config.(http.Handler); ok {
 		opt.handle("/", rootHandler)
 	}

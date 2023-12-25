@@ -6,7 +6,7 @@ require (
 	github.com/bluenviron/gortsplib/v4 v4.6.2
 	github.com/bluenviron/mediacommon v1.5.1
 	github.com/cnotch/ipchub v1.1.0
-	github.com/google/uuid v1.4.0
+	github.com/dgrijalva/jwt-go v3.2.0+incompatible
 	github.com/logrusorgru/aurora/v4 v4.0.0
 	github.com/mcuadros/go-defaults v1.2.0
 	github.com/pion/rtp v1.8.3
@@ -23,7 +23,6 @@ require (
 )
 
 require (
-	github.com/dgrijalva/jwt-go v3.2.0+incompatible // indirect
 	github.com/go-sql-driver/mysql v1.7.0 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
@@ -41,13 +40,11 @@ require (
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pkg/errors v0.9.1
 	github.com/power-devops/perfstat v0.0.0-20221212215047-62379fc7944b // indirect
-	github.com/quic-go/qtls-go1-20 v0.3.3 // indirect
-	github.com/shoenig/go-m1cpu v0.1.6 // indirect
+	github.com/quic-go/qtls-go1-20 v0.3.4 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yapingcat/gomedia v0.0.0-20230905155010-55b9713fcec1
 	github.com/yusufpapurcu/wmi v1.2.3 // indirect
-	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.16.0 // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
 	golang.org/x/mod v0.12.0 // indirect

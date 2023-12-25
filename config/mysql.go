@@ -18,7 +18,7 @@ type Mysql struct {
 
 var DB *gorm.DB
 
-func (m *Mysql) Run() {
+func (m *Mysql) RunMysql() {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local",
 		m.Username, m.Password, m.Host, m.Port, m.DB)
 	var err error
