@@ -61,9 +61,10 @@ type SpesificTrack interface {
 	CompleteRTP(*AVFrame)
 	CompleteAVCC(*AVFrame)
 	WriteSliceBytes([]byte)
-	WriteRTPFrame(*RTPFrame)
+	WriteRTPFrame(*util.ListItem[RTPFrame])
 	generateTimestamp(uint32)
-	WriteSequenceHead([]byte)
+	WriteSequenceHead([]byte) error
+	writeAVCCFrame(uint32, *util.BLLReader, *util.BLL) error
 	GetNALU_SEI() *util.ListItem[util.Buffer]
 	Flush()
 }
@@ -164,6 +165,8 @@ func (av *Media) SetStuff(stuff ...any) {
 			av.BytesPool = v
 		case SpesificTrack:
 			av.SpesificTrack = v
+		case []any:
+			av.SetStuff(v...)
 		default:
 			av.Base.SetStuff(v)
 		}

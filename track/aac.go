@@ -24,8 +24,7 @@ func NewAAC(stream IStream, stuff ...any) (aac *AAC) {
 	aac.CodecID = codec.CodecID_AAC
 	aac.Channels = 2
 	aac.SampleSize = 16
-	aac.SetStuff("aac", stream, byte(97), aac)
-	aac.SetStuff(stuff...)
+	aac.SetStuff("aac", byte(97), aac, stuff, stream)
 	if aac.BytesPool == nil {
 		aac.BytesPool = make(util.BytesPool, 17)
 	}
@@ -69,7 +68,9 @@ func (aac *AAC) WriteADTS(ts uint32, b util.IBytes) {
 }
 
 // https://datatracker.ietf.org/doc/html/rfc3640#section-3.2.1
-func (aac *AAC) WriteRTPFrame(frame *RTPFrame) {
+func (aac *AAC) WriteRTPFrame(rtpItem *util.ListItem[RTPFrame]) {
+	aac.Value.RTP.Push(rtpItem)
+	frame := &rtpItem.Value
 	if len(frame.Payload) < 2 {
 		// aac.fragments = aac.fragments[:0]
 		return
@@ -165,13 +166,14 @@ func (aac *AAC) WriteRTPFrame(frame *RTPFrame) {
 	}
 }
 
-func (aac *AAC) WriteSequenceHead(sh []byte) {
+func (aac *AAC) WriteSequenceHead(sh []byte) error {
 	aac.Media.WriteSequenceHead(sh)
 	config1, config2 := aac.SequenceHead[2], aac.SequenceHead[3]
 	aac.Channels = ((config2 >> 3) & 0x0F) //声道
 	aac.SampleRate = uint32(codec.SamplingFrequencies[((config1&0x7)<<1)|(config2>>7)])
 	aac.Parse(aac.SequenceHead[2:])
 	go aac.Attach()
+	return nil
 }
 
 func (aac *AAC) WriteAVCC(ts uint32, frame *util.BLL) error {

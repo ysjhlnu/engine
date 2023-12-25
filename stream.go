@@ -1,13 +1,17 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
-	. "github.com/logrusorgru/aurora"
+	. "github.com/logrusorgru/aurora/v4"
 	"go.uber.org/zap"
 	"m7s.live/engine/v4/common"
 	. "m7s.live/engine/v4/common"
@@ -30,56 +34,70 @@ func (s StreamAction) String() string {
 // 四状态机
 const (
 	STATE_WAITPUBLISH StreamState = iota // 等待发布者状态
+	STATE_WAITTRACK                      // 等待音视频轨道激活
 	STATE_PUBLISHING                     // 正在发布流状态
 	STATE_WAITCLOSE                      // 等待关闭状态(自动关闭延时开启)
 	STATE_CLOSED                         // 流已关闭，不可使用
 )
 
 const (
-	ACTION_PUBLISH     StreamAction = iota
-	ACTION_TIMEOUT                  // 发布流长时间没有数据/长时间没有发布者发布流/等待关闭时间到
-	ACTION_PUBLISHLOST              // 发布者意外断开
-	ACTION_CLOSE                    // 主动关闭流
-	ACTION_LASTLEAVE                // 最后一个订阅者离开
-	ACTION_FIRSTENTER               // 第一个订阅者进入
+	ACTION_PUBLISH        StreamAction = iota
+	ACTION_TRACKAVAILABLE              // 音视频轨道激活
+	ACTION_TIMEOUT                     // 发布流长时间没有数据/长时间没有发布者发布流/等待关闭时间到
+	ACTION_PUBLISHCLOSE                // 发布者关闭
+	ACTION_CLOSE                       // 主动关闭流
+	ACTION_LASTLEAVE                   // 最后一个订阅者离开
+	ACTION_FIRSTENTER                  // 第一个订阅者进入
+	ACTION_NOTRACK                     // 没有音视频轨道
 )
 
-var StateNames = [...]string{"⌛", "🟢", "🟡", "🔴"}
-var ActionNames = [...]string{"publish", "timeout", "publish lost", "close", "last leave", "first enter", "no tracks"}
+var StateNames = [...]string{"⌛", "🟡", "🟢", "🟠", "🔴"}
+var ActionNames = [...]string{"publish", "track available", "timeout", "publish close", "close", "last leave", "first enter", "no tracks"}
 
 /*
 stateDiagram-v2
     [*] --> ⌛等待发布者 : 创建
-    ⌛等待发布者 --> 🟢正在发布 :发布
+    ⌛等待发布者 --> 🟡等待轨道 :发布
     ⌛等待发布者 --> 🔴已关闭 :关闭
     ⌛等待发布者 --> 🔴已关闭  :超时
     ⌛等待发布者 --> 🔴已关闭  :最后订阅者离开
+		🟡等待轨道 --> 🟢正在发布 :轨道激活
+		🟡等待轨道 --> 🔴已关闭 :关闭
+		🟡等待轨道 --> 🔴已关闭 :超时
+		🟡等待轨道 --> 🔴已关闭 :最后订阅者离开
     🟢正在发布 --> ⌛等待发布者: 发布者断开
-    🟢正在发布 --> 🟡等待关闭: 最后订阅者离开
+    🟢正在发布 --> 🟠等待关闭: 最后订阅者离开
     🟢正在发布 --> 🔴已关闭  :关闭
-    🟡等待关闭 --> 🟢正在发布 :第一个订阅者进入
-    🟡等待关闭 --> 🔴已关闭  :关闭
-    🟡等待关闭 --> 🔴已关闭  :超时
-    🟡等待关闭 --> 🔴已关闭  :发布者断开
+    🟠等待关闭 --> 🟢正在发布 :第一个订阅者进入
+    🟠等待关闭 --> 🔴已关闭  :关闭
+    🟠等待关闭 --> 🔴已关闭  :超时
+    🟠等待关闭 --> 🔴已关闭  :发布者断开
 */
 
 var StreamFSM = [len(StateNames)]map[StreamAction]StreamState{
 	{
-		ACTION_PUBLISH:   STATE_PUBLISHING,
+		ACTION_PUBLISH:   STATE_WAITTRACK,
 		ACTION_TIMEOUT:   STATE_CLOSED,
 		ACTION_LASTLEAVE: STATE_CLOSED,
 		ACTION_CLOSE:     STATE_CLOSED,
 	},
 	{
-		ACTION_PUBLISHLOST: STATE_WAITPUBLISH,
-		ACTION_LASTLEAVE:   STATE_WAITCLOSE,
-		ACTION_CLOSE:       STATE_CLOSED,
+		ACTION_TRACKAVAILABLE: STATE_PUBLISHING,
+		ACTION_TIMEOUT:        STATE_CLOSED,
+		ACTION_LASTLEAVE:      STATE_WAITCLOSE,
+		ACTION_CLOSE:          STATE_CLOSED,
 	},
 	{
-		ACTION_PUBLISHLOST: STATE_CLOSED,
-		ACTION_TIMEOUT:     STATE_CLOSED,
-		ACTION_FIRSTENTER:  STATE_PUBLISHING,
-		ACTION_CLOSE:       STATE_CLOSED,
+		// ACTION_PUBLISHCLOSE: STATE_WAITPUBLISH,
+		ACTION_TIMEOUT:   STATE_WAITPUBLISH,
+		ACTION_LASTLEAVE: STATE_WAITCLOSE,
+		ACTION_CLOSE:     STATE_CLOSED,
+	},
+	{
+		// ACTION_PUBLISHCLOSE: STATE_CLOSED,
+		ACTION_TIMEOUT:    STATE_CLOSED,
+		ACTION_FIRSTENTER: STATE_PUBLISHING,
+		ACTION_CLOSE:      STATE_CLOSED,
 	},
 	{},
 }
@@ -106,6 +124,7 @@ type StreamTimeoutConfig struct {
 type Tracks struct {
 	sync.Map
 	MainVideo   *track.Video
+	MainAudio   *track.Audio
 	SEI         *track.Data[[]byte]
 	marshalLock sync.Mutex
 }
@@ -129,6 +148,9 @@ func (tracks *Tracks) Add(name string, t Track) bool {
 			v.SEIReader.Ring = tracks.SEI.Ring
 		}
 	case *track.Audio:
+		if tracks.MainAudio == nil {
+			tracks.MainAudio = v
+		}
 		if tracks.MainVideo != nil {
 			v.Narrow()
 		}
@@ -176,10 +198,13 @@ func (tracks *Tracks) MarshalJSON() ([]byte, error) {
 	return json.Marshal(trackList)
 }
 
+var streamIdGen atomic.Uint32
+
 // Stream 流定义
 type Stream struct {
 	timeout    *time.Timer //当前状态的超时定时器
 	actionChan util.SafeChan[any]
+	ID         uint32 // 流ID
 	*log.Logger
 	StartTime time.Time //创建时间
 	StreamTimeoutConfig
@@ -256,15 +281,19 @@ func findOrCreateStream(streamPath string, waitTimeout time.Duration) (s *Stream
 		AppName:    p[0],
 		StreamName: strings.Join(p[1:], "/"),
 		StartTime:  time.Now(),
-		Logger:     log.LocaleLogger.With(zap.String("stream", streamPath)),
 		timeout:    time.NewTimer(waitTimeout),
 	})
 	if s := actual.(*Stream); loaded {
-		s.Debug("Stream Found")
+		for s.Logger == nil {
+			runtime.Gosched()
+		}
+		s.Debug("found")
 		return s, false
 	} else {
+		s.ID = streamIdGen.Add(1)
 		s.Subscribers.Init()
-		s.actionChan.Init(1)
+		s.actionChan.Init(10)
+		s.Logger = log.LocaleLogger.With(zap.String("stream", streamPath), zap.Uint32("id", s.ID))
 		s.Info("created")
 		go s.run()
 		return s, true
@@ -305,18 +334,21 @@ func (r *Stream) action(action StreamAction) (ok bool) {
 			}
 			r.timeout.Reset(waitTime)
 			r.Debug("wait publisher", zap.Duration("wait timeout", waitTime))
-		case STATE_PUBLISHING:
+		case STATE_WAITTRACK:
 			if len(r.SEHistory) > 1 {
 				stateEvent = SErepublish{event}
 			} else {
 				stateEvent = SEpublish{event}
 			}
+			r.timeout.Reset(time.Second * 5) // 5秒心跳，检测track的存活度
+		case STATE_PUBLISHING:
+			stateEvent = SEtrackAvaliable{event}
+			r.Subscribers.SendInviteTrack(r)
 			r.Subscribers.Broadcast(stateEvent)
-			// if r.IdleTimeout > 0 && r.Subscribers.Len() == 0 {
-			// 	return r.action(ACTION_LASTLEAVE)
-			// } else {
-			r.timeout.Reset(r.PublishTimeout) // 5秒心跳，检测track的存活度
-			// }
+			if puller, ok := r.Publisher.(IPuller); ok {
+				puller.OnConnected()
+			}
+			r.timeout.Reset(time.Second * 5) // 5秒心跳，检测track的存活度
 		case STATE_WAITCLOSE:
 			stateEvent = SEwaitClose{event}
 			if r.IdleTimeout > 0 {
@@ -335,9 +367,18 @@ func (r *Stream) action(action StreamAction) (ok bool) {
 			r.Subscribers.Dispose()
 			r.actionChan.Close()
 		}
+		if actionCoust := time.Since(event.Time); actionCoust > 100*time.Millisecond {
+			r.Warn("action timeout", zap.String("action", action.String()), zap.Duration("cost", actionCoust))
+		}
 		EventBus <- stateEvent
+		if actionCoust := time.Since(event.Time); actionCoust > 100*time.Millisecond {
+			r.Warn("action timeout after eventbus", zap.String("action", action.String()), zap.Duration("cost", actionCoust))
+		}
 		if r.Publisher != nil {
 			r.Publisher.OnEvent(stateEvent)
+			if actionCoust := time.Since(event.Time); actionCoust > 100*time.Millisecond {
+				r.Warn("action timeout after send to publisher", zap.String("action", action.String()), zap.Duration("cost", actionCoust))
+			}
 		}
 	} else {
 		r.Debug("wrong action", zap.String("action", action.String()))
@@ -414,7 +455,7 @@ func (s *Stream) run() {
 		case <-s.timeout.C:
 			timeStart = time.Now()
 			timeOutInfo = zap.String("state", s.State.String())
-			if s.State == STATE_PUBLISHING {
+			if s.State == STATE_PUBLISHING || s.State == STATE_WAITTRACK {
 				for sub := range s.Subscribers.internal {
 					if sub.IsClosed() {
 						delete(s.Subscribers.internal, sub)
@@ -449,12 +490,12 @@ func (s *Stream) run() {
 							s.Warn("no tracks")
 							lost = true
 						} else if s.Publisher != nil && s.Publisher.IsClosed() {
-							s.Warn("publish is closed")
+							s.Warn("publish is closed", zap.Error(context.Cause(s.Publisher.GetPublisher())), zap.String("ptr", fmt.Sprintf("%p", s.Publisher.GetPublisher().Context)))
 							lost = true
 						}
 					}
 					if lost {
-						s.action(ACTION_PUBLISHLOST)
+						s.action(ACTION_TIMEOUT)
 						continue
 					}
 					if s.IdleTimeout > 0 && s.Subscribers.Len() == 0 && time.Since(s.StartTime) > s.IdleTimeout {
@@ -462,9 +503,12 @@ func (s *Stream) run() {
 						continue
 					}
 				}
-				s.timeout.Reset(time.Second * 5)
-				//订阅者等待音视频轨道超时了，放弃等待，订阅成功
-				s.Subscribers.AbortWait()
+				if s.State == STATE_WAITTRACK {
+					s.action(ACTION_TRACKAVAILABLE)
+				} else {
+					s.Subscribers.AbortWait()
+					s.timeout.Reset(time.Second * 5)
+				}
 			} else {
 				s.Debug("timeout", timeOutInfo)
 				s.action(ACTION_TIMEOUT)
@@ -472,11 +516,6 @@ func (s *Stream) run() {
 		case action, ok := <-s.actionChan.C:
 			if !ok {
 				return
-			} else if s.State == STATE_CLOSED {
-				if s.actionChan.Close() { //再次尝试关闭
-					return
-				}
-				continue
 			}
 			timeStart = time.Now()
 			switch v := action.(type) {
@@ -487,15 +526,33 @@ func (s *Stream) run() {
 				timeOutInfo = zap.String("action", "Publish")
 				if s.IsClosed() {
 					v.Reject(ErrStreamIsClosed)
+					break
 				}
-				republish := s.Publisher == v.Value                                  // 重复发布
-				kicked := !republish && s.Publisher != nil && s.Publisher.IsClosed() // 被踢下线
-				if !republish {
-					s.Publisher = v.Value
+				puber := v.Value.GetPublisher()
+				conf := puber.Config
+				republish := s.Publisher == v.Value // 重复发布
+				if republish {
+					s.Info("republish")
+					s.Tracks.Range(func(name string, t Track) {
+						t.SetStuff(TrackStateOffline)
+					})
 				}
-				if s.action(ACTION_PUBLISH) || republish || kicked {
-					v.Resolve()
-					if s.Publisher.GetPublisher().Config.InsertSEI {
+				needKick := !republish && s.Publisher != nil && conf.KickExist // 需要踢掉老的发布者
+				if needKick {
+					oldPuber := s.Publisher.GetPublisher()
+					s.Warn("kick", zap.String("old type", oldPuber.Type))
+					// 接管老的发布者的音视频轨道
+					puber.AudioTrack = oldPuber.AudioTrack
+					puber.VideoTrack = oldPuber.VideoTrack
+					s.Publisher.OnEvent(SEKick{CreateEvent[struct{}](util.Null)})
+				}
+				s.Publisher = v.Value
+				s.PublishTimeout = conf.PublishTimeout
+				s.DelayCloseTimeout = conf.DelayCloseTimeout
+				s.IdleTimeout = conf.IdleTimeout
+				s.PauseTimeout = conf.PauseTimeout
+				if s.action(ACTION_PUBLISH) || republish || needKick {
+					if conf.InsertSEI {
 						if s.Tracks.SEI == nil {
 							s.Tracks.SEI = track.NewDataTrack[[]byte]("sei")
 							s.Tracks.SEI.Locker = &sync.Mutex{}
@@ -505,13 +562,16 @@ func (s *Stream) run() {
 							}
 						}
 					}
+					v.Resolve()
 				} else {
+					s.Warn("duplicate publish")
 					v.Reject(ErrDuplicatePublish)
 				}
 			case *util.Promise[ISubscriber]:
 				timeOutInfo = zap.String("action", "Subscribe")
 				if s.IsClosed() {
 					v.Reject(ErrStreamIsClosed)
+					break
 				}
 				suber := v.Value
 				io := suber.GetSubscriber()
@@ -544,10 +604,18 @@ func (s *Stream) run() {
 					s.Tracks.Range(func(name string, t Track) {
 						waits.Accept(t)
 					})
-					if !pubConfig.PubAudio || s.Subscribers.waitAborted {
+					if !pubConfig.PubAudio {
+						waits.audio.StopWait()
+					} else if s.State == STATE_PUBLISHING && len(waits.audio) > 0 {
+						waits.audio.InviteTrack(suber)
+					} else if s.Subscribers.waitAborted {
 						waits.audio.StopWait()
 					}
-					if !pubConfig.PubVideo || s.Subscribers.waitAborted {
+					if !pubConfig.PubVideo {
+						waits.video.StopWait()
+					} else if s.State == STATE_PUBLISHING && len(waits.video) > 0 {
+						waits.video.InviteTrack(suber)
+					} else if s.Subscribers.waitAborted {
 						waits.video.StopWait()
 					}
 				}
@@ -561,6 +629,9 @@ func (s *Stream) run() {
 				s.onSuberClose(v)
 			case TrackRemoved:
 				timeOutInfo = zap.String("action", "TrackRemoved")
+				if s.IsClosed() {
+					break
+				}
 				name := v.GetName()
 				if t, ok := s.Tracks.LoadAndDelete(name); ok {
 					s.Info("track -1", zap.String("name", name))
@@ -569,6 +640,10 @@ func (s *Stream) run() {
 				}
 			case *util.Promise[Track]:
 				timeOutInfo = zap.String("action", "Track")
+				if s.IsClosed() {
+					v.Reject(ErrStreamIsClosed)
+					break
+				}
 				if s.State == STATE_WAITPUBLISH {
 					s.action(ACTION_PUBLISH)
 				}
@@ -591,8 +666,9 @@ func (s *Stream) run() {
 					if _, ok := v.Value.(*track.Audio); ok && !pubConfig.PubVideo {
 						s.Subscribers.AbortWait()
 					}
-					// 这里重置的目的是当PublishTimeout设置很大的情况下，需要及时取消订阅者的等待
-					s.timeout.Reset(time.Second * 5)
+					if (s.Tracks.MainVideo != nil || !pubConfig.PubVideo) && (!pubConfig.PubAudio || s.Tracks.MainAudio != nil) {
+						s.action(ACTION_TRACKAVAILABLE)
+					}
 				} else {
 					v.Reject(ErrBadTrackName)
 				}
@@ -605,13 +681,18 @@ func (s *Stream) run() {
 				timeOutInfo = zap.String("action", "unknown")
 				s.Error("unknown action", timeOutInfo)
 			}
+			if s.IsClosed() && s.actionChan.Close() { //再次尝试关闭
+				return
+			}
 		}
 	}
 }
 
 func (s *Stream) AddTrack(t Track) (promise *util.Promise[Track]) {
 	promise = util.NewPromise(t)
-	s.Receive(promise)
+	if !s.Receive(promise) {
+		promise.Reject(ErrStreamIsClosed)
+	}
 	return
 }
 

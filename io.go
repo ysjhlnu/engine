@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"reflect"
@@ -35,19 +36,19 @@ type AuthPub interface {
 
 // 发布者或者订阅者的共用结构体
 type IO struct {
-	ID                 string
-	Type               string
-	RemoteAddr         string
-	context.Context    `json:"-" yaml:"-"` //不要直接设置，应当通过OnEvent传入父级Context
-	context.CancelFunc `json:"-" yaml:"-"` //流关闭是关闭发布者或者订阅者
-	*log.Logger        `json:"-" yaml:"-"`
-	StartTime          time.Time //创建时间
-	Stream             *Stream   `json:"-" yaml:"-"`
-	io.Reader          `json:"-" yaml:"-"`
-	io.Writer          `json:"-" yaml:"-"`
-	io.Closer          `json:"-" yaml:"-"`
-	Args               url.Values
-	Spesific           IIO `json:"-" yaml:"-"`
+	ID                      string
+	Type                    string
+	RemoteAddr              string
+	context.Context         `json:"-" yaml:"-"` //不要直接设置，应当通过SetParentCtx传入父级Context
+	context.CancelCauseFunc `json:"-" yaml:"-"` //流关闭是关闭发布者或者订阅者
+	*log.Logger             `json:"-" yaml:"-"`
+	StartTime               time.Time //创建时间
+	Stream                  *Stream   `json:"-" yaml:"-"`
+	io.Reader               `json:"-" yaml:"-"`
+	io.Writer               `json:"-" yaml:"-"`
+	io.Closer               `json:"-" yaml:"-"`
+	Args                    url.Values
+	Spesific                IIO `json:"-" yaml:"-"`
 }
 
 func (io *IO) IsClosed() bool {
@@ -69,7 +70,7 @@ func (i *IO) SetIO(conn any) {
 
 // SetParentCtx（可选）
 func (i *IO) SetParentCtx(parent context.Context) {
-	i.Context, i.CancelFunc = context.WithCancel(parent)
+	i.Context, i.CancelCauseFunc = context.WithCancelCause(parent)
 }
 
 func (i *IO) SetLogger(logger *log.Logger) {
@@ -78,8 +79,10 @@ func (i *IO) SetLogger(logger *log.Logger) {
 
 func (i *IO) OnEvent(event any) {
 	switch event.(type) {
-	case SEclose, SEKick:
-		i.close()
+	case SEclose:
+		i.close(StopError{zap.String("event", "close")})
+	case SEKick:
+		i.close(StopError{zap.String("event", "kick")})
 	}
 }
 
@@ -102,26 +105,30 @@ type IIO interface {
 	log.Zap
 }
 
-func (i *IO) close() bool {
+func (i *IO) close(err StopError) bool {
 	if i.IsClosed() {
+		i.Warn("already closed", err...)
 		return false
+	}
+	i.Info("close", err...)
+	if i.CancelCauseFunc != nil {
+		i.CancelCauseFunc(err)
 	}
 	if i.Closer != nil {
 		i.Closer.Close()
-	}
-	if i.CancelFunc != nil {
-		i.CancelFunc()
 	}
 	return true
 }
 
 // Stop 停止订阅或者发布，由订阅者或者发布者调用
 func (io *IO) Stop(reason ...zapcore.Field) {
-	if io.close() {
-		io.Info("stop", reason...)
-	} else {
-		io.Warn("already stopped", reason...)
-	}
+	io.close(StopError(reason))
+}
+
+type StopError []zapcore.Field
+
+func (s StopError) Error() string {
+	return "stop"
 }
 
 var (
@@ -164,16 +171,19 @@ func (io *IO) receive(streamPath string, specific IIO) error {
 	}
 	io.Args = u.Query()
 	wt := time.Second * 5
-	if v, ok := specific.(ISubscriber); ok {
-		wt = v.GetSubscriber().Config.WaitTimeout
+	var iSub ISubscriber
+	var iPub IPublisher
+	var isSubscribe bool
+	if iSub, isSubscribe = specific.(ISubscriber); isSubscribe {
+		wt = iSub.GetSubscriber().Config.WaitTimeout
+	} else {
+		iPub = specific.(IPublisher)
 	}
 	s, create := findOrCreateStream(u.Path, wt)
 	if s == nil {
 		return ErrBadStreamName
 	}
-
 	if io.Stream == nil { //初次
-		io.Context, io.CancelFunc = context.WithCancel(util.Conditoinal[context.Context](io.Context == nil, Engine, io.Context))
 		if io.Type == "" {
 			io.Type = reflect.TypeOf(specific).Elem().Name()
 		}
@@ -184,47 +194,40 @@ func (io *IO) receive(streamPath string, specific IIO) error {
 		if io.Logger == nil {
 			io.Logger = s.With(logFeilds...)
 		} else {
-			logFeilds = append(logFeilds, zap.String("streamPath", s.Path))
 			io.Logger = io.Logger.With(logFeilds...)
 		}
 	}
 	io.Stream = s
 	io.Spesific = specific
 	io.StartTime = time.Now()
-	if v, ok := specific.(IPublisher); ok {
-		conf := v.GetPublisher().Config
-		io.Info("publish")
+	if io.Context == nil {
+		io.Debug("create context")
+		io.SetParentCtx(Engine.Context)
+	} else if io.IsClosed() {
+		io.Debug("recreate context")
+		io.SetParentCtx(Engine.Context)
+	} else {
+		io.Debug("warp context")
+		io.SetParentCtx(io.Context)
+	}
+	defer func() {
+		if err == nil {
+			specific.OnEvent(specific)
+		}
+	}()
+	if !isSubscribe {
+		puber := iPub.GetPublisher()
+		conf := puber.Config
+		io.Info("publish", zap.String("ptr", fmt.Sprintf("%p", io.Context)))
 		s.pubLocker.Lock()
 		defer s.pubLocker.Unlock()
-		oldPublisher := s.Publisher
-		if oldPublisher != nil {
-			zot := zap.String("old type", oldPublisher.GetPublisher().Type)
-			if oldPublisher == specific { // 断线重连
-				s.Info("republish", zot)
-			} else if conf.KickExist { // 根据配置是否剔出原来的发布者
-				s.Warn("kick", zot)
-				oldPublisher.OnEvent(SEKick{})
-			} else {
-				s.Warn("duplicate publish", zot)
-				return ErrDuplicatePublish
-			}
-		}
-		s.PublishTimeout = conf.PublishTimeout
-		s.DelayCloseTimeout = conf.DelayCloseTimeout
-		s.IdleTimeout = conf.IdleTimeout
-		s.PauseTimeout = conf.PauseTimeout
-		defer func() {
-			if err == nil {
-				specific.OnEvent(util.Conditoinal[IIO](oldPublisher == nil, specific, oldPublisher))
-			}
-		}()
 		if config.Global.EnableAuth {
 			onAuthPub := OnAuthPub
 			if auth, ok := specific.(AuthPub); ok {
 				onAuthPub = auth.OnAuth
 			}
 			if onAuthPub != nil {
-				authPromise := util.NewPromise(specific.(IPublisher))
+				authPromise := util.NewPromise(iPub)
 				if err = onAuthPub(authPromise); err == nil {
 					err = authPromise.Await()
 				}
@@ -237,28 +240,23 @@ func (io *IO) receive(streamPath string, specific IIO) error {
 				}
 			}
 		}
-		if promise := util.NewPromise(specific.(IPublisher)); s.Receive(promise) {
+		if promise := util.NewPromise(iPub); s.Receive(promise) {
 			err = promise.Await()
 			return err
 		}
 	} else {
-		conf := specific.(ISubscriber).GetSubscriber().Config
+		conf := iSub.GetSubscriber().Config
 		io.Info("subscribe")
 		if create {
 			EventBus <- InvitePublish{CreateEvent(s.Path)} // 通知发布者按需拉流
 		}
-		defer func() {
-			if err == nil {
-				specific.OnEvent(specific)
-			}
-		}()
 		if config.Global.EnableAuth && !conf.Internal {
 			onAuthSub := OnAuthSub
 			if auth, ok := specific.(AuthSub); ok {
 				onAuthSub = auth.OnAuth
 			}
 			if onAuthSub != nil {
-				authPromise := util.NewPromise(specific.(ISubscriber))
+				authPromise := util.NewPromise(iSub)
 				if err = onAuthSub(authPromise); err == nil {
 					err = authPromise.Await()
 				}
@@ -271,7 +269,7 @@ func (io *IO) receive(streamPath string, specific IIO) error {
 				}
 			}
 		}
-		if promise := util.NewPromise(specific.(ISubscriber)); s.Receive(promise) {
+		if promise := util.NewPromise(iSub); s.Receive(promise) {
 			err = promise.Await()
 			return err
 		}

@@ -1,7 +1,8 @@
 package track
 
 import (
-	"io"
+	"bytes"
+	"time"
 
 	"go.uber.org/zap"
 	"m7s.live/engine/v4/codec"
@@ -14,13 +15,13 @@ var _ SpesificTrack = (*H264)(nil)
 
 type H264 struct {
 	Video
+	buf util.Buffer // rtp 包临时缓存,对于不规范的 rtp 包（sps 放到了 fua 中导致）需要缓存
 }
 
 func NewH264(stream IStream, stuff ...any) (vt *H264) {
 	vt = &H264{}
 	vt.Video.CodecID = codec.CodecID_H264
-	vt.SetStuff("h264", byte(96), uint32(90000), stream, vt)
-	vt.SetStuff(stuff...)
+	vt.SetStuff("h264", byte(96), uint32(90000), vt, stuff, stream)
 	if vt.BytesPool == nil {
 		vt.BytesPool = make(util.BytesPool, 17)
 	}
@@ -31,13 +32,16 @@ func NewH264(stream IStream, stuff ...any) (vt *H264) {
 }
 
 func (vt *H264) WriteSliceBytes(slice []byte) {
+	if len(slice) > 4 && bytes.Equal(slice[:4], codec.NALU_Delimiter2) {
+		slice = slice[4:] // 有些设备厂商不规范，所以需要移除前导的 00 00 00 01
+	}
+	if len(slice) == 0 {
+		vt.Error("H264 WriteSliceBytes got empty slice")
+		return
+	}
 	naluType := codec.ParseH264NALUType(slice[0])
 	if log.Trace {
 		vt.Trace("naluType", zap.Uint8("naluType", naluType.Byte()))
-	}
-	if vt.Value.IFrame {
-		vt.AppendAuBytes(slice)
-		return
 	}
 	switch naluType {
 	case codec.NALU_SPS:
@@ -82,48 +86,68 @@ func (vt *H264) WriteSliceBytes(slice []byte) {
 	case codec.NALU_Access_Unit_Delimiter:
 	case codec.NALU_Filler_Data:
 	default:
+		if vt.Value.IFrame {
+			vt.AppendAuBytes(slice)
+			return
+		}
 		vt.Error("nalu type not support", zap.Int("type", int(naluType)))
 	}
 }
-
-func (vt *H264) WriteAVCC(ts uint32, frame *util.BLL) (err error) {
-	if l := frame.ByteLength; l < 6 {
-		vt.Error("AVCC data too short", zap.Int("len", l))
-		return io.ErrShortWrite
-	}
-	if frame.GetByte(1) == 0 {
-		vt.WriteSequenceHead(frame.ToBytes())
-		frame.Recycle()
-		var info codec.AVCDecoderConfigurationRecord
-		if _, err = info.Unmarshal(vt.SequenceHead[5:]); err == nil {
-			vt.SPSInfo, _ = codec.ParseSPS(info.SequenceParameterSetNALUnit)
-			vt.nalulenSize = int(info.LengthSizeMinusOne&3 + 1)
-			vt.SPS = info.SequenceParameterSetNALUnit
-			vt.PPS = info.PictureParameterSetNALUnit
-			vt.ParamaterSets[0] = vt.SPS
-			vt.ParamaterSets[1] = vt.PPS
-		} else {
-			vt.Stream.Error("H264 ParseSpsPps Error")
-			vt.Stream.Close()
-		}
-		return
+func (vt *H264) WriteSequenceHead(head []byte) (err error) {
+	var info codec.AVCDecoderConfigurationRecord
+	if _, err = info.Unmarshal(head[5:]); err == nil {
+		vt.SPSInfo, _ = codec.ParseSPS(info.SequenceParameterSetNALUnit)
+		vt.nalulenSize = int(info.LengthSizeMinusOne&3 + 1)
+		vt.SPS = info.SequenceParameterSetNALUnit
+		vt.PPS = info.PictureParameterSetNALUnit
+		vt.ParamaterSets[0] = vt.SPS
+		vt.ParamaterSets[1] = vt.PPS
+		vt.Video.WriteSequenceHead(head)
 	} else {
-		return vt.Video.WriteAVCC(ts, frame)
+		vt.Stream.Error("H264 ParseSpsPps Error")
+		vt.Stream.Close()
 	}
+	return
 }
 
-func (vt *H264) WriteRTPFrame(frame *RTPFrame) {
+func (vt *H264) WriteRTPFrame(rtpItem *util.ListItem[RTPFrame]) {
+	defer func() {
+		err := recover()
+		if err != nil {
+			vt.Error("WriteRTPFrame panic", zap.Any("err", err))
+			vt.Stream.Close()
+		}
+	}()
 	if vt.lastSeq != vt.lastSeq2+1 && vt.lastSeq2 != 0 {
 		vt.lostFlag = true
 		vt.Warn("lost rtp packet", zap.Uint16("lastSeq", vt.lastSeq), zap.Uint16("lastSeq2", vt.lastSeq2))
 	}
+	frame := &rtpItem.Value
+	pts := frame.Timestamp
 	rv := vt.Value
+	// 有些流的 rtp 包中没有设置 marker 导致无法判断是否是最后一个包，此时通过时间戳变化判断，先 flush 之前的帧
+	if rv.PTS != time.Duration(pts) {
+		if rv.AUList.ByteLength > 0 {
+			if !vt.dcChanged && rv.IFrame {
+				vt.insertDCRtp()
+			}
+			vt.Flush()
+			rv = vt.Value
+		}
+		vt.generateTimestamp(pts)
+	}
+	rv.RTP.Push(rtpItem)
 	if naluType := frame.H264Type(); naluType < 24 {
 		vt.WriteSliceBytes(frame.Payload)
 	} else {
+		offset := naluType.Offset()
 		switch naluType {
 		case codec.NALU_STAPA, codec.NALU_STAPB:
-			for buffer := util.Buffer(frame.Payload[naluType.Offset():]); buffer.CanRead(); {
+			if len(frame.Payload) <= offset {
+				vt.Error("invalid nalu size", zap.Int("naluType", int(naluType)))
+				return
+			}
+			for buffer := util.Buffer(frame.Payload[offset:]); buffer.CanRead(); {
 				nextSize := int(buffer.ReadUint16())
 				if buffer.Len() >= nextSize {
 					vt.WriteSliceBytes(buffer.ReadN(nextSize))
@@ -133,19 +157,37 @@ func (vt *H264) WriteRTPFrame(frame *RTPFrame) {
 				}
 			}
 		case codec.NALU_FUA, codec.NALU_FUB:
-			if util.Bit1(frame.Payload[1], 0) {
-				vt.WriteSliceByte(naluType.Parse(frame.Payload[1]).Or(frame.Payload[0] & 0x60))
+			b1 := frame.Payload[1]
+			if util.Bit1(b1, 0) {
+				naluType = naluType.Parse(b1)
+				firstByte := naluType.Or(frame.Payload[0] & 0x60)
+				switch naluType {
+				case codec.NALU_SPS, codec.NALU_PPS:
+					vt.buf.WriteByte(firstByte)
+				default:
+					vt.WriteSliceByte(firstByte)
+				}
 			}
-			if rv.AUList.Pre != nil && rv.AUList.Pre.Value != nil {
-				rv.AUList.Pre.Value.Push(vt.BytesPool.GetShell(frame.Payload[naluType.Offset():]))
+			if vt.buf.Len() > 0 {
+				vt.buf.Write(frame.Payload[offset:])
 			} else {
-				vt.Error("fu have no start")
+				if rv.AUList.Pre != nil && rv.AUList.Pre.Value != nil {
+					rv.AUList.Pre.Value.Push(vt.BytesPool.GetShell(frame.Payload[offset:]))
+				} else {
+					vt.Error("fu have no start")
+					return
+				}
+			}
+			if !util.Bit1(b1, 1) {
+				// fua 还没结束
 				return
+			} else if vt.buf.Len() > 0 {
+				vt.WriteAnnexB(uint32(rv.PTS), uint32(rv.DTS), vt.buf)
+				vt.buf = nil
 			}
 		}
 	}
 	if frame.Marker && rv.AUList.ByteLength > 0 {
-		vt.generateTimestamp(frame.Timestamp)
 		if !vt.dcChanged && rv.IFrame {
 			vt.insertDCRtp()
 		}

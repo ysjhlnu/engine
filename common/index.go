@@ -97,6 +97,7 @@ func (bt *Base[T, F]) Dispose() {
 }
 
 type Track interface {
+	GetReaderCount() int32
 	GetName() string
 	GetBPS() int
 	GetFPS() int
@@ -117,6 +118,7 @@ type AVTrack interface {
 	WriteAVCC(ts uint32, frame *util.BLL) error //写入AVCC格式的数据
 	WriteRTP(*util.ListItem[RTPFrame])
 	WriteRTPPack(*rtp.Packet)
+	WriteSequenceHead(sh []byte) error
 	Flush()
 	SetSpeedLimit(time.Duration)
 	GetRTPFromPool() *util.ListItem[RTPFrame]

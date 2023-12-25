@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"reflect"
 	"time"
 
 	"m7s.live/engine/v4/common"
@@ -53,6 +54,10 @@ type SEpublish struct {
 	StateEvent
 }
 
+type SEtrackAvaliable struct {
+	StateEvent
+}
+
 type SErepublish struct {
 	StateEvent
 }
@@ -88,5 +93,29 @@ func TryInvitePublish(streamPath string) {
 	s := Streams.Get(streamPath)
 	if s == nil || s.Publisher == nil {
 		EventBus <- InvitePublish{Event: CreateEvent(streamPath)}
+	}
+}
+
+// InviteTrackEvent 邀请推送指定 Track 事件(转码需要)
+type InviteTrackEvent struct {
+	Event[string]
+	ISubscriber
+}
+
+func InviteTrack(name string, suber ISubscriber) {
+	EventBus <- InviteTrackEvent{Event: CreateEvent(name), ISubscriber: suber}
+}
+
+var handlers = make(map[reflect.Type][]any)
+
+func ListenEvent[T any](handler func(event T)) {
+	t := reflect.TypeOf(handler).In(0)
+	handlers[t] = append(handlers[t], handler)
+}
+
+func EmitEvent[T any](event T) {
+	t := reflect.TypeOf(event)
+	for _, handler := range handlers[t] {
+		handler.(func(event T))(event)
 	}
 }

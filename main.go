@@ -3,19 +3,23 @@ package engine // import "m7s.live/engine/v4"
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
+	"runtime"
 	"strings"
 	"time"
 
-	. "github.com/logrusorgru/aurora"
+	"github.com/denisbrodbeck/machineid"
+	"github.com/google/uuid"
+	. "github.com/logrusorgru/aurora/v4"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"
-	"m7s.live/engine/v4/config"
 	"m7s.live/engine/v4/lang"
 	"m7s.live/engine/v4/log"
 	"m7s.live/engine/v4/util"
@@ -56,7 +60,7 @@ func Run(ctx context.Context, conf any) (err error) {
 	SysInfo.StartTime = time.Now()
 	SysInfo.Version = Engine.Version
 	Engine.Context = ctx
-	var cg config.Config
+	var cg map[string]map[string]any
 	switch v := conf.(type) {
 	case string:
 		if _, err = os.Stat(v); err != nil {
@@ -67,7 +71,7 @@ func Run(ctx context.Context, conf any) (err error) {
 		}
 	case []byte:
 		ConfigRaw = v
-	case config.Config:
+	case map[string]map[string]any:
 		cg = v
 	}
 
@@ -85,17 +89,11 @@ func Run(ctx context.Context, conf any) (err error) {
 			log.Error("parsing yml error:", err)
 		}
 	}
+	Engine.RawConfig.Parse(&EngineConfig.Engine, "GLOBAL")
 	if cg != nil {
-		Engine.RawConfig = cg.GetChild("global")
-		if b, err := yaml.Marshal(Engine.RawConfig); err == nil {
-			Engine.Yaml = string(b)
-		}
-		//将配置信息同步到结构体
-		Engine.RawConfig.Unmarshal(&EngineConfig.Engine)
+		Engine.RawConfig.ParseUserFile(cg["global"])
 	}
-
 	var logger log.Logger
-
 	log.LocaleLogger = logger.Lang(lang.Get(EngineConfig.LogLang))
 	if EngineConfig.LogLevel == "trace" {
 		log.Trace = true
@@ -109,13 +107,9 @@ func Run(ctx context.Context, conf any) (err error) {
 
 		log.LogLevel.SetLevel(loglevel)
 	}
-
-	//if EngineConfig.LogLine {
-	//	log.LocaleLogger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1), zap.AddStacktrace(zapcore.ErrorLevel))
-	//}
-
 	// Plugin中的logger都是从这里派生出去的
 	Engine.Logger = log.LocaleLogger.Named("engine")
+
 	EngineConfig.Run()
 	Engine.DB = config.DB
 
@@ -123,7 +117,7 @@ func Run(ctx context.Context, conf any) (err error) {
 	// 使得RawConfig具备全量配置信息，用于合并到插件配置中
 	Engine.RawConfig = config.Struct2Config(&EngineConfig.Engine, "GLOBAL")
 	Engine.assign()
-	//Engine.Logger.Debug("", zap.Any("config", EngineConfig))
+	Engine.Logger.Debug("", zap.Any("config", EngineConfig))
 	util.PoolSize = EngineConfig.PoolSize
 	EventBus = make(chan any, EngineConfig.EventBusSize)
 	go EngineConfig.Listen(Engine)
@@ -138,24 +132,38 @@ func Run(ctx context.Context, conf any) (err error) {
 			continue
 		}
 		plugin.Info("initialize", zap.String("version", plugin.Version))
-		userConfig := cg.GetChild(plugin.Name)
-		if userConfig != nil {
-			if b, err := yaml.Marshal(userConfig); err == nil {
-				plugin.Yaml = string(b)
-			}
-		}
-		if defaultYaml := reflect.ValueOf(plugin.Config).Elem().FieldByName("DefaultYaml"); defaultYaml.IsValid() {
-			if err := yaml.Unmarshal([]byte(defaultYaml.String()), &plugin.RawConfig); err != nil {
-				log.Error("parsing default config error:", err)
-			}
-		}
-		if plugin.Yaml != "" {
-			yaml.Unmarshal([]byte(plugin.Yaml), &plugin.RawConfig)
-		}
-		plugin.assign()
-	}
 
-	//UUID := uuid.NewString()
+		plugin.RawConfig.Parse(plugin.Config, strings.ToUpper(plugin.Name))
+		for _, fname := range MergeConfigs {
+			if name := strings.ToLower(fname); plugin.RawConfig.Has(name) {
+				plugin.RawConfig.Get(name).ParseGlobal(Engine.RawConfig.Get(name))
+			}
+		}
+		var userConfig map[string]any
+		if plugin.defaultYaml != "" {
+			if err := yaml.Unmarshal([]byte(plugin.defaultYaml), &userConfig); err != nil {
+				log.Error("parsing default config error:", err)
+			} else {
+				plugin.RawConfig.ParseDefaultYaml(userConfig)
+			}
+		}
+		userConfig = cg[strings.ToLower(plugin.Name)]
+		plugin.RawConfig.ParseUserFile(userConfig)
+		if EngineConfig.DisableAll {
+			plugin.Disabled = true
+		}
+		if userConfig["enable"] == false {
+			plugin.Disabled = true
+		} else if userConfig["enable"] == true {
+			plugin.Disabled = false
+		}
+		if plugin.Disabled {
+			plugin.Warn("plugin disabled")
+		} else {
+			plugin.assign()
+		}
+	}
+	UUID := uuid.NewString()
 	reportTimer := time.NewTicker(time.Minute)
 	contentBuf := bytes.NewBuffer(nil)
 	//req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://console.monibuca.com/report", nil)
@@ -194,22 +202,28 @@ func Run(ctx context.Context, conf any) (err error) {
 	for _, plugin := range disabledPlugins {
 		fmt.Print(Colorize(" "+plugin.Name+" ", BlackFg|RedBg|CrossedOutFm), " ")
 	}
-
-	//rp := struct {
-	//	UUID     string `json:"uuid"`
-	//	Machine  string `json:"machine"`
-	//	Instance string `json:"instance"`
-	//	Version  string `json:"version"`
-	//	OS       string `json:"os"`
-	//	Arch     string `json:"arch"`
-	//}{UUID, id, EngineConfig.GetInstanceId(), version, runtime.GOOS, runtime.GOARCH}
-	//json.NewEncoder(contentBuf).Encode(&rp)
-	//req.Body = io.NopCloser(contentBuf)
+	fmt.Println()
+	fmt.Println(Bold(Cyan("官网地址: ")), Yellow("https://m7s.live"))
+	fmt.Println(Bold(Cyan("启动工程: ")), Yellow("https://github.com/langhuihui/monibuca"))
+	fmt.Println(Bold(Cyan("文档地址: ")), Yellow("https://docs.m7s.live"))
+	fmt.Println(Bold(Cyan("视频教程: ")), Yellow("https://space.bilibili.com/328443019/channel/collectiondetail?sid=514619"))
+	fmt.Println(Bold(Cyan("远程界面: ")), Yellow("https://console.monibuca.com"))
+	fmt.Println(Yellow("关注公众号：不卡科技，获取更多信息"))
+	rp := struct {
+		UUID     string `json:"uuid"`
+		Machine  string `json:"machine"`
+		Instance string `json:"instance"`
+		Version  string `json:"version"`
+		OS       string `json:"os"`
+		Arch     string `json:"arch"`
+	}{UUID, id, EngineConfig.GetInstanceId(), version, runtime.GOOS, runtime.GOARCH}
+	json.NewEncoder(contentBuf).Encode(&rp)
+	req.Body = io.NopCloser(contentBuf)
 	if EngineConfig.Secret != "" {
 		EngineConfig.OnEvent(ctx)
 	}
-	//var c http.Client
-	//c.Do(req)
+	var c http.Client
+	c.Do(req)
 	for _, plugin := range enabledPlugins {
 		plugin.Config.OnEvent(EngineConfig) //引擎初始化完成后，通知插件
 	}

@@ -28,8 +28,7 @@ func NewG711(stream IStream, alaw bool, stuff ...any) (g711 *G711) {
 	g711.SampleSize = 8
 	g711.Channels = 1
 	g711.AVCCHead = []byte{(byte(g711.CodecID) << 4) | (1 << 1)}
-	g711.SetStuff(stream, uint32(8000), g711)
-	g711.SetStuff(stuff...)
+	g711.SetStuff(uint32(8000), g711, stuff, stream)
 	if g711.BytesPool == nil {
 		g711.BytesPool = make(util.BytesPool, 17)
 	}
@@ -59,7 +58,9 @@ func (g711 *G711) WriteAVCC(ts uint32, frame *util.BLL) error {
 	return nil
 }
 
-func (g711 *G711) WriteRTPFrame(frame *RTPFrame) {
+func (g711 *G711) WriteRTPFrame(rtpItem *util.ListItem[RTPFrame]) {
+	frame := &rtpItem.Value
+	g711.Value.RTP.Push(rtpItem)
 	if g711.SampleRate != 90000 {
 		g711.generateTimestamp(uint32(uint64(frame.Timestamp) * 90000 / uint64(g711.SampleRate)))
 	}

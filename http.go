@@ -92,20 +92,28 @@ func (conf *GlobalConfig) API_getConfig(w http.ResponseWriter, r *http.Request) 
 	}
 	var data any
 	if q.Get("yaml") != "" {
-		mm, err := yaml.Marshal(p.RawConfig)
-		if err != nil {
-			mm = []byte("")
-		}
-		data = struct {
+		var tmp struct {
 			File     string
 			Modified string
 			Merged   string
-		}{
-			p.Yaml, p.modifiedYaml, string(mm),
 		}
-
+		mm, err := yaml.Marshal(p.RawConfig.File)
+		if err == nil {
+			tmp.File = string(mm)
+		}
+		mm, err = yaml.Marshal(p.RawConfig.Modify)
+		if err == nil {
+			tmp.Modified = string(mm)
+		}
+		mm, err = yaml.Marshal(p.RawConfig.GetMap())
+		if err == nil {
+			tmp.Merged = string(mm)
+		}
+		data = &tmp
+	} else if q.Get("formily") != "" {
+		data = p.RawConfig.GetFormily()
 	} else {
-		data = p.RawConfig
+		data = &p.RawConfig
 	}
 	util.ReturnValue(data, w, r)
 }
@@ -125,23 +133,22 @@ func (conf *GlobalConfig) API_modifyConfig(w http.ResponseWriter, r *http.Reques
 	} else {
 		p = Engine
 	}
+	var modified map[string]any
 	if q.Get("yaml") != "" {
-		err = yaml.NewDecoder(r.Body).Decode(&p.Modified)
+		err = yaml.NewDecoder(r.Body).Decode(&modified)
 	} else {
-		err = json.NewDecoder(r.Body).Decode(&p.Modified)
+		err = json.NewDecoder(r.Body).Decode(&modified)
 	}
 	if err != nil {
 		util.ReturnError(util.APIErrorDecode, err.Error(), w, r)
-	} else if err = p.Save(); err == nil {
-		p.RawConfig.Assign(p.Modified)
-		out, err := yaml.Marshal(p.Modified)
-		if err == nil {
-			p.modifiedYaml = string(out)
-		}
-		util.ReturnOK(w, r)
-	} else {
-		util.ReturnError(util.APIErrorSave, err.Error(), w, r)
+		return
 	}
+	p.RawConfig.ParseModifyFile(modified)
+	if err = p.Save(); err != nil {
+		util.ReturnError(util.APIErrorSave, err.Error(), w, r)
+		return
+	}
+	util.ReturnOK(w, r)
 }
 
 // API_updateConfig 热更新配置
@@ -158,7 +165,23 @@ func (conf *GlobalConfig) API_updateConfig(w http.ResponseWriter, r *http.Reques
 	} else {
 		p = Engine
 	}
-	p.Update(p.Modified)
+	var err error
+	var modified map[string]any
+	if q.Get("yaml") != "" {
+		err = yaml.NewDecoder(r.Body).Decode(&modified)
+	} else {
+		err = json.NewDecoder(r.Body).Decode(&modified)
+	}
+	if err != nil {
+		util.ReturnError(util.APIErrorDecode, err.Error(), w, r)
+		return
+	}
+	p.RawConfig.ParseModifyFile(modified)
+	if err = p.Save(); err != nil {
+		util.ReturnError(util.APIErrorSave, err.Error(), w, r)
+		return
+	}
+	p.Update(&p.RawConfig)
 	util.ReturnOK(w, r)
 }
 

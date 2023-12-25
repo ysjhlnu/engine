@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"io"
 	"strings"
 	"time"
@@ -16,6 +15,7 @@ var znomorereconnect = zap.String("reason", "no more reconnect")
 type IPuller interface {
 	IPublisher
 	Connect() error
+	OnConnected()
 	Disconnect()
 	Pull() error
 	Reconnect() bool
@@ -26,6 +26,10 @@ type IPuller interface {
 // 用于远程拉流的发布者
 type Puller struct {
 	ClientIO[config.Pull]
+}
+
+func (pub *Puller) OnConnected() {
+	pub.ReConnectCount = 0 // 重置重连次数
 }
 
 // 是否需要重连
@@ -43,8 +47,17 @@ func (pub *Puller) startPull(puller IPuller) {
 	if i := strings.Index(streamPath, "?"); i >= 0 {
 		streamPath = streamPath[:i]
 	}
-	if _, loaded := Pullers.LoadOrStore(streamPath, puller); loaded {
-		puller.Error("puller already exists")
+	if oldPuller, loaded := Pullers.LoadOrStore(streamPath, puller); loaded {
+		pub := oldPuller.(IPuller).GetPublisher()
+		stream = pub.Stream
+		if stream != nil {
+			puller.Error("puller already exists", zap.Int8("streamState", int8(stream.State)))
+			if stream.State == STATE_CLOSED {
+				oldPuller.(IPuller).Stop(zap.String("reason", "dead puller"))
+			}
+		} else {
+			puller.Error("puller already exists", zap.Time("createAt", pub.StartTime))
+		}
 		return
 	}
 	defer func() {
@@ -55,7 +68,7 @@ func (pub *Puller) startPull(puller IPuller) {
 		}
 	}()
 	puber := puller.GetPublisher()
-	startTime := time.Now()
+	var startTime time.Time
 	for puller.Info("start pull"); puller.Reconnect(); puller.Warn("restart pull") {
 		if time.Since(startTime) < 5*time.Second {
 			time.Sleep(5 * time.Second)
@@ -75,13 +88,12 @@ func (pub *Puller) startPull(puller IPuller) {
 				puller.Error("pull publish", zap.Error(err))
 				return
 			}
-			s := puber.Stream
-			if stream != s && stream != nil { // 这段代码说明老流已经中断，创建了新流，需要把track置空，从而避免复用
+			if stream != puber.Stream {
+				// 老流中的音视频轨道不可再使用
 				puber.AudioTrack = nil
 				puber.VideoTrack = nil
-				puber.Context, puber.CancelFunc = context.WithCancel(Engine) // 老流的上下文已经取消，需要重新创建
 			}
-			stream = s
+			stream = puber.Stream
 			badPuller = false
 			if err = puller.Pull(); err != nil && !puller.IsShutdown() {
 				puller.Error("pull interrupt", zap.Error(err))
