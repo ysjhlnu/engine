@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"gorm.io/gorm"
 	"io"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 
 // InstallPlugin 安装插件，传入插件配置生成插件信息对象
 func InstallPlugin(config config.Plugin) *Plugin {
+
 	defaults.SetDefaults(config)
 	t := reflect.TypeOf(config).Elem()
 
@@ -33,6 +35,7 @@ func InstallPlugin(config config.Plugin) *Plugin {
 		Name:   name,
 		Config: config,
 	}
+
 	_, pluginFilePath, _, _ := runtime.Caller(1)
 	configDir := filepath.Dir(pluginFilePath)
 	if parts := strings.Split(configDir, "@"); len(parts) > 1 {
@@ -51,8 +54,6 @@ func InstallPlugin(config config.Plugin) *Plugin {
 		plugins = append(plugins, plugin)
 	}
 
-	fmt.Printf("\nplugin: %#v\n", plugin)
-
 	return plugin
 }
 
@@ -63,7 +64,7 @@ type DefaultYaml string
 type Plugin struct {
 	context.Context    `json:"-" yaml:"-"`
 	context.CancelFunc `json:"-" yaml:"-"`
-	Name               string        //插件名称
+	Name               string //插件名称
 	Config             config.Plugin `json:"-" yaml:"-"` //类型化的插件配置
 	Version            string        //插件版本
 	Yaml               string        //配置文件中的配置项
@@ -71,6 +72,7 @@ type Plugin struct {
 	RawConfig          config.Config //最终合并后的配置的map形式方便查询
 	Modified           config.Config //修改过的配置项
 	*log.Logger        `json:"-" yaml:"-"`
+	DB                 *gorm.DB    `json:"-" yaml:"-"`
 	saveTimer          *time.Timer //用于保存的时候的延迟，防抖
 	Disabled           bool
 }
@@ -93,15 +95,15 @@ func (opt *Plugin) handle(pattern string, handler http.Handler) {
 	}
 	if ok {
 		opt.Debug("http handle added", zap.String("pattern", pattern))
-		conf.Handle(pattern, opt.logHandler(pattern, handler))
+		conf.Handle(pattern, opt.logHandler(pattern, handler)) // 注册到自己监听的端口中去
 	}
 	if opt != Engine {
 		pattern = "/" + strings.ToLower(opt.Name) + pattern
 		opt.Debug("http handle added to engine", zap.String("pattern", pattern))
-		EngineConfig.Handle(pattern, opt.logHandler(pattern, handler))
+		EngineConfig.Handle(pattern, opt.logHandler(pattern, handler)) // 注册到全局的路由中去
 	}
 
-	opt.Sugar().Debugf("api list: %v", pattern)
+	//opt.Sugar().Debugf("api list: %v", pattern)
 
 	apiList = append(apiList, pattern)
 }
@@ -158,16 +160,13 @@ func (opt *Plugin) assign() {
 		}
 	}
 
-	fmt.Println("------------------------------")
-	fmt.Printf("\nplugin name: %s\n", opt.Name)
-
 	opt.registerHandler()
 	opt.run()
 }
 
 func (opt *Plugin) run() {
 	opt.Context, opt.CancelFunc = context.WithCancel(Engine)
-	opt.RawConfig.Unmarshal(opt.Config)
+	opt.RawConfig.Unmarshal(opt.Config) // RawConfig 此时是已经处理合并过的配置
 	opt.RawConfig = config.Struct2Config(opt.Config, strings.ToUpper(opt.Name))
 	// var buffer bytes.Buffer
 	// err := yaml.NewEncoder(&buffer).Encode(opt.Config)
@@ -180,7 +179,7 @@ func (opt *Plugin) run() {
 	// }
 	opt.Config.OnEvent(FirstConfig(opt.RawConfig))
 	delete(opt.RawConfig, "defaultyaml")
-	opt.Debug("config", zap.Any("config", opt.Config))
+	//opt.Debug("config", zap.Any("config", opt.Config))
 	// opt.RawConfig = config.Struct2Config(opt.Config)
 	if conf, ok := opt.Config.(config.HTTPConfig); ok {
 		go conf.Listen(opt)
@@ -209,8 +208,6 @@ func (opt *Plugin) registerHandler() {
 		}
 		switch handler := v.Method(i).Interface().(type) {
 		case func(http.ResponseWriter, *http.Request):
-
-			fmt.Printf("\n %d http router: %s\n", i+1, patten)
 
 			opt.handle(patten, http.HandlerFunc(handler))
 			// case func(*http.Request) (int, string, any):

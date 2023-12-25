@@ -3,20 +3,14 @@ package engine // import "m7s.live/engine/v4"
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"time"
 
-	"github.com/denisbrodbeck/machineid"
-	"github.com/google/uuid"
 	. "github.com/logrusorgru/aurora"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -40,11 +34,11 @@ var (
 	Plugins      = make(map[string]*Plugin) // Plugins 所有的插件配置
 	plugins      []*Plugin                  //插件列表
 	EngineConfig = &GlobalConfig{}
-	Engine       = InstallPlugin(EngineConfig)
+	Engine       = InstallPlugin(EngineConfig)              // 复用安装插件逻辑，将全局配置信息注入，并启动server
 	SettingDir   = filepath.Join(ExecDir, ".m7s")           //配置缓存目录，该目录按照插件名称作为文件名存储修改过的配置
 	MergeConfigs = []string{"Publish", "Subscribe", "HTTP"} //需要合并配置的属性项，插件若没有配置则使用全局配置
-	EventBus     chan any
-	apiList      []string //注册到引擎的API接口列表
+	EventBus     chan any                                   // 事件总线
+	apiList      []string                                   //注册到引擎的API接口列表
 )
 
 func init() {
@@ -58,7 +52,7 @@ func init() {
 
 // Run 启动Monibuca引擎，传入总的Context，可用于关闭所有
 func Run(ctx context.Context, conf any) (err error) {
-	id, _ := machineid.ProtectedID("monibuca")
+	//id, _ := machineid.ProtectedID("monibuca")
 	SysInfo.StartTime = time.Now()
 	SysInfo.Version = Engine.Version
 	Engine.Context = ctx
@@ -99,7 +93,9 @@ func Run(ctx context.Context, conf any) (err error) {
 		//将配置信息同步到结构体
 		Engine.RawConfig.Unmarshal(&EngineConfig.Engine)
 	}
+
 	var logger log.Logger
+
 	log.LocaleLogger = logger.Lang(lang.Get(EngineConfig.LogLang))
 	if EngineConfig.LogLevel == "trace" {
 		log.Trace = true
@@ -110,19 +106,32 @@ func Run(ctx context.Context, conf any) (err error) {
 			logger.Error("parse log level error:", zap.Error(err))
 			loglevel = zapcore.InfoLevel
 		}
+
 		log.LogLevel.SetLevel(loglevel)
 	}
 
+	//if EngineConfig.LogLine {
+	//	log.LocaleLogger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1), zap.AddStacktrace(zapcore.ErrorLevel))
+	//}
+
+	// Plugin中的logger都是从这里派生出去的
 	Engine.Logger = log.LocaleLogger.Named("engine")
+	EngineConfig.Run()
+	Engine.DB = config.DB
+
+	//Engine.Logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1), zap.AddStacktrace(zapcore.ErrorLevel))
 	// 使得RawConfig具备全量配置信息，用于合并到插件配置中
 	Engine.RawConfig = config.Struct2Config(&EngineConfig.Engine, "GLOBAL")
 	Engine.assign()
-	Engine.Logger.Debug("", zap.Any("config", EngineConfig))
+	//Engine.Logger.Debug("", zap.Any("config", EngineConfig))
 	util.PoolSize = EngineConfig.PoolSize
 	EventBus = make(chan any, EngineConfig.EventBusSize)
 	go EngineConfig.Listen(Engine)
+
+	// 插件全部注册完成
 	for _, plugin := range plugins {
-		plugin.Logger = log.LocaleLogger.Named(plugin.Name)
+		plugin.Logger = log.LocaleLogger.Named(plugin.Name) // 将log派生到每个插件中
+		plugin.DB = config.DB
 		if os.Getenv(strings.ToUpper(plugin.Name)+"_ENABLE") == "false" {
 			plugin.Disabled = true
 			plugin.Warn("disabled by env")
@@ -145,11 +154,12 @@ func Run(ctx context.Context, conf any) (err error) {
 		}
 		plugin.assign()
 	}
-	UUID := uuid.NewString()
+
+	//UUID := uuid.NewString()
 	reportTimer := time.NewTicker(time.Minute)
 	contentBuf := bytes.NewBuffer(nil)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://console.monibuca.com/report", nil)
-	req.Header.Set("Content-Type", "application/json")
+	//req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://console.monibuca.com/report", nil)
+	//req.Header.Set("Content-Type", "application/json")
 	version := Engine.Version
 	if ver, ok := ctx.Value("version").(string); ok && ver != "" && ver != "dev" {
 		version = ver
@@ -184,28 +194,22 @@ func Run(ctx context.Context, conf any) (err error) {
 	for _, plugin := range disabledPlugins {
 		fmt.Print(Colorize(" "+plugin.Name+" ", BlackFg|RedBg|CrossedOutFm), " ")
 	}
-	fmt.Println()
-	fmt.Println(Bold(Cyan("官网地址: ")), Yellow("https://m7s.live"))
-	fmt.Println(Bold(Cyan("启动工程: ")), Yellow("https://github.com/langhuihui/monibuca"))
-	fmt.Println(Bold(Cyan("文档地址: ")), Yellow("https://docs.m7s.live"))
-	fmt.Println(Bold(Cyan("视频教程: ")), Yellow("https://space.bilibili.com/328443019/channel/collectiondetail?sid=514619"))
-	fmt.Println(Bold(Cyan("远程界面: ")), Yellow("https://console.monibuca.com"))
-	fmt.Println(Yellow("关注公众号：不卡科技，获取更多信息"))
-	rp := struct {
-		UUID     string `json:"uuid"`
-		Machine  string `json:"machine"`
-		Instance string `json:"instance"`
-		Version  string `json:"version"`
-		OS       string `json:"os"`
-		Arch     string `json:"arch"`
-	}{UUID, id, EngineConfig.GetInstanceId(), version, runtime.GOOS, runtime.GOARCH}
-	json.NewEncoder(contentBuf).Encode(&rp)
-	req.Body = io.NopCloser(contentBuf)
+
+	//rp := struct {
+	//	UUID     string `json:"uuid"`
+	//	Machine  string `json:"machine"`
+	//	Instance string `json:"instance"`
+	//	Version  string `json:"version"`
+	//	OS       string `json:"os"`
+	//	Arch     string `json:"arch"`
+	//}{UUID, id, EngineConfig.GetInstanceId(), version, runtime.GOOS, runtime.GOARCH}
+	//json.NewEncoder(contentBuf).Encode(&rp)
+	//req.Body = io.NopCloser(contentBuf)
 	if EngineConfig.Secret != "" {
 		EngineConfig.OnEvent(ctx)
 	}
-	var c http.Client
-	c.Do(req)
+	//var c http.Client
+	//c.Do(req)
 	for _, plugin := range enabledPlugins {
 		plugin.Config.OnEvent(EngineConfig) //引擎初始化完成后，通知插件
 	}
@@ -228,9 +232,9 @@ func Run(ctx context.Context, conf any) (err error) {
 			return
 		case <-reportTimer.C:
 			contentBuf.Reset()
-			contentBuf.WriteString(fmt.Sprintf(`{"uuid":"`+UUID+`","streams":%d}`, Streams.Len()))
-			req.Body = io.NopCloser(contentBuf)
-			c.Do(req)
+			//contentBuf.WriteString(fmt.Sprintf(`{"uuid":"`+UUID+`","streams":%d}`, Streams.Len()))
+			//req.Body = io.NopCloser(contentBuf)
+			//c.Do(req)
 		}
 	}
 }

@@ -127,6 +127,7 @@ type Engine struct {
 	Publish
 	Subscribe
 	HTTP
+	Mysql
 	EnableAVCC     bool `default:"true"` //启用AVCC格式，rtmp、http-flv协议使用
 	EnableRTP      bool `default:"true"` //启用RTP格式，rtsp、webrtc等协议使用
 	EnableSubEvent bool `default:"true"` //启用订阅事件,禁用可以提高性能
@@ -134,6 +135,7 @@ type Engine struct {
 	Console
 	LogLang             string        `default:"zh"`    //日志语言
 	LogLevel            string        `default:"info"`  //日志级别
+	LogLine             bool          `default:"false"` // 日志行号开关
 	RTPReorderBufferLen int           `default:"50"`    //RTP重排序缓冲长度
 	EventBusSize        int           `default:"10"`    //事件总线大小
 	PulseInterval       time.Duration `default:"5s"`    //心跳事件间隔

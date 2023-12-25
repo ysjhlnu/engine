@@ -5,7 +5,6 @@ go 1.20
 require (
 	github.com/bluenviron/mediacommon v1.0.0
 	github.com/cnotch/ipchub v1.1.0
-	github.com/google/uuid v1.3.0
 	github.com/logrusorgru/aurora v2.0.3+incompatible
 	github.com/mcuadros/go-defaults v1.2.0
 	github.com/pion/rtp v1.8.1
@@ -17,9 +16,15 @@ require (
 	golang.org/x/net v0.14.0
 	golang.org/x/sync v0.2.0
 	gopkg.in/yaml.v3 v3.0.1
+	gorm.io/driver/mysql v1.5.2
+	gorm.io/gorm v1.25.5
 )
 
 require (
+	github.com/dgrijalva/jwt-go v3.2.0+incompatible // indirect
+	github.com/go-sql-driver/mysql v1.7.0 // indirect
+	github.com/jinzhu/inflection v1.0.0 // indirect
+	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
 	go.uber.org/atomic v1.10.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
@@ -27,7 +32,6 @@ require (
 )
 
 require (
-	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
 	github.com/golang/mock v1.6.0 // indirect

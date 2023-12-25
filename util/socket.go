@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -208,5 +210,32 @@ func BasicAuth(u, p string, next http.Handler) http.Handler {
 		// authentication and send a 401 Unauthorized response.
 		w.Header().Set("WWW-Authenticate", `Basic realm="restricted", charset="UTF-8"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	})
+}
+
+// CheckToken 校验token
+func CheckToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("token")
+		if token == "" {
+			ret := APIError{http.StatusUnauthorized, "Unauthorized"}
+			raw, _ := json.Marshal(ret)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, string(raw))
+			return
+		}
+		mc, err := ParseToken(token)
+		if err != nil {
+			fmt.Println(err)
+			ret := APIError{http.StatusUnauthorized, "Invalid Token"}
+			raw, _ := json.Marshal(ret)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, string(raw))
+			return
+		}
+		r.Header.Set("username", mc.Username)
+		next.ServeHTTP(w, r)
 	})
 }

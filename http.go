@@ -39,6 +39,10 @@ func (conf *GlobalConfig) API_summary(rw http.ResponseWriter, r *http.Request) {
 	util.ReturnValue(&summary, rw, r)
 }
 
+func (conf *GlobalConfig) API_Streams(rw http.ResponseWriter, r *http.Request) {
+	util.ReturnValue(&summary.Streams, rw, r)
+}
+
 func (conf *GlobalConfig) API_plugins(rw http.ResponseWriter, r *http.Request) {
 	util.ReturnValue(Plugins, rw, r)
 }

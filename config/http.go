@@ -49,6 +49,7 @@ func (config *HTTP) Handle(path string, f http.Handler) {
 	}
 	if config.UserName != "" && config.Password != "" {
 		f = util.BasicAuth(config.UserName, config.Password, f)
+		//f = util.CheckToken(f)
 	}
 	for _, middleware := range config.middlewares {
 		f = middleware(path, f)
