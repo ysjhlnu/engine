@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -110,6 +111,8 @@ func (cfg *Engine) Remote(ctx context.Context) (wasConnected bool, err error) {
 		var s quic.Stream
 		if s, err = conn.AcceptStream(ctx); err == nil {
 			go cfg.ReceiveRequest(s, conn)
+		} else {
+			log.Error("AcceptStream error:", err)
 		}
 	}
 	return wasConnected, err
@@ -121,6 +124,7 @@ func (cfg *Engine) ReceiveRequest(s quic.Stream, conn quic.Connection) error {
 	reader := bufio.NewReader(s)
 	var req *http.Request
 	url, _, err := reader.ReadLine()
+	fmt.Println(url)
 	if err == nil {
 		ctx, cancel := context.WithCancel(s.Context())
 		defer cancel()

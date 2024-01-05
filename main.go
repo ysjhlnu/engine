@@ -108,7 +108,7 @@ func Run(ctx context.Context, conf any) (err error) {
 	// 使得RawConfig具备全量配置信息，用于合并到插件配置中
 
 	Engine.assign()
-	Engine.Logger.Debug("", zap.Any("config", EngineConfig))
+	//Engine.Logger.Debug("", zap.Any("config", EngineConfig))
 	util.PoolSize = EngineConfig.PoolSize
 	EventBus = make(chan any, EngineConfig.EventBusSize)
 	go EngineConfig.Listen(Engine)
