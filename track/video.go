@@ -114,6 +114,7 @@ func (vt *Video) WriteAnnexB(pts uint32, dts uint32, frame []byte) {
 		vt.Value.DTS = time.Duration(dts)
 	}
 	vt.Value.BytesIn += len(frame)
+
 	common.SplitAnnexB(frame, vt.writeAnnexBSlice, codec.NALU_Delimiter2)
 	if vt.Value.AUList.ByteLength > 0 {
 		vt.Flush()
@@ -253,6 +254,7 @@ func (vt *Video) Flush() {
 			var au util.BLL
 			au.Push(vt.SpesificTrack.GetNALU_SEI())
 			au.Push(vt.BytesPool.GetShell(seiFrame.Data))
+			vt.Info("sei", zap.Int("len", len(seiFrame.Data)))
 			vt.Value.AUList.UnshiftValue(&au)
 		} else if err != nil {
 			vt.SEIReader = nil

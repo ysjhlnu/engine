@@ -123,6 +123,9 @@ type StreamTimeoutConfig struct {
 }
 type Tracks struct {
 	sync.Map
+	Video       []*track.Video
+	Audio       []*track.Audio
+	Data        []common.Track
 	MainVideo   *track.Video
 	MainAudio   *track.Audio
 	SEI         *track.Data[[]byte]
@@ -156,6 +159,16 @@ func (tracks *Tracks) Add(name string, t Track) bool {
 		}
 	}
 	_, loaded := tracks.LoadOrStore(name, t)
+	if !loaded {
+		switch v := t.(type) {
+		case *track.Video:
+			tracks.Video = append(tracks.Video, v)
+		case *track.Audio:
+			tracks.Audio = append(tracks.Audio, v)
+		default:
+			tracks.Data = append(tracks.Data, v)
+		}
+	}
 	return !loaded
 }
 
@@ -489,9 +502,15 @@ func (s *Stream) run() {
 						if trackCount == 0 {
 							s.Warn("no tracks")
 							lost = true
+							s.action(ACTION_CLOSE)
+							continue
 						} else if s.Publisher != nil && s.Publisher.IsClosed() {
 							s.Warn("publish is closed", zap.Error(context.Cause(s.Publisher.GetPublisher())), zap.String("ptr", fmt.Sprintf("%p", s.Publisher.GetPublisher().Context)))
 							lost = true
+							if len(s.Tracks.Audio)+len(s.Tracks.Video) == 0 {
+								s.action(ACTION_CLOSE)
+								continue
+							}
 						}
 					}
 					if lost {
@@ -505,10 +524,9 @@ func (s *Stream) run() {
 				}
 				if s.State == STATE_WAITTRACK {
 					s.action(ACTION_TRACKAVAILABLE)
-				} else {
-					s.Subscribers.AbortWait()
-					s.timeout.Reset(time.Second * 5)
 				}
+				s.Subscribers.AbortWait()
+				s.timeout.Reset(time.Second * 5)
 			} else {
 				s.Debug("timeout", timeOutInfo)
 				s.action(ACTION_TIMEOUT)
@@ -529,6 +547,10 @@ func (s *Stream) run() {
 					break
 				}
 				puber := v.Value.GetPublisher()
+				var oldPuber *Publisher
+				if s.Publisher != nil {
+					oldPuber = s.Publisher.GetPublisher()
+				}
 				conf := puber.Config
 				republish := s.Publisher == v.Value // 重复发布
 				if republish {
@@ -539,11 +561,7 @@ func (s *Stream) run() {
 				}
 				needKick := !republish && s.Publisher != nil && conf.KickExist // 需要踢掉老的发布者
 				if needKick {
-					oldPuber := s.Publisher.GetPublisher()
 					s.Warn("kick", zap.String("old type", oldPuber.Type))
-					// 接管老的发布者的音视频轨道
-					puber.AudioTrack = oldPuber.AudioTrack
-					puber.VideoTrack = oldPuber.VideoTrack
 					s.Publisher.OnEvent(SEKick{CreateEvent[struct{}](util.Null)})
 				}
 				s.Publisher = v.Value
@@ -552,6 +570,11 @@ func (s *Stream) run() {
 				s.IdleTimeout = conf.IdleTimeout
 				s.PauseTimeout = conf.PauseTimeout
 				if s.action(ACTION_PUBLISH) || republish || needKick {
+					if oldPuber != nil {
+						// 接管老的发布者的音视频轨道
+						puber.AudioTrack = oldPuber.AudioTrack
+						puber.VideoTrack = oldPuber.VideoTrack
+					}
 					if conf.InsertSEI {
 						if s.Tracks.SEI == nil {
 							s.Tracks.SEI = track.NewDataTrack[[]byte]("sei")
