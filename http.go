@@ -2,16 +2,19 @@ package engine
 
 import (
 	"encoding/json"
+	"github.com/marspere/goencrypt"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 	"m7s.live/engine/v4/codec"
 	"m7s.live/engine/v4/config"
+	"m7s.live/engine/v4/model"
 	"m7s.live/engine/v4/util"
 )
 
@@ -381,4 +384,127 @@ func (conf *GlobalConfig) API_insertSEI(w http.ResponseWriter, r *http.Request) 
 	} else {
 		util.ReturnError(util.APIErrorNoBody, err.Error(), w, r)
 	}
+}
+
+// API_user_login 用户登录
+func (conf *GlobalConfig) API_user_login(w http.ResponseWriter, r *http.Request) {
+
+	type userinfo struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		Engine.Error(err.Error())
+		util.ReturnError(util.APIErrorInternal, "内部错误", w, r)
+		return
+	}
+	userInfo := userinfo{}
+	if err = json.Unmarshal(raw, &userInfo); err != nil {
+		Engine.Error(err.Error())
+		util.ReturnError(util.APIErrorInternal, "内部错误", w, r)
+		return
+	}
+
+	if userInfo.Username == "" || userInfo.Password == "" {
+		util.ReturnError(util.APIErrorUserEmpty, "用户名密码为空", w, r)
+		return
+	}
+
+	// 校验用户名和密码是否正确
+	dbuser := model.UserLoginData{}
+	err = Engine.DB.Model(&model.User{}).Where("binary name = ?", userInfo.Username).First(&dbuser).Error
+	if err != nil {
+		Engine.Error(err.Error())
+		Engine.Logger.Sugar().Debugf("账号或密码有误[%s]-[%s]-状态[%d]", userInfo.Username, userInfo.Password, dbuser.Status)
+		util.ReturnError(util.APIErrorUserPwd, "账号或密码有误", w, r)
+		return
+	}
+
+	if dbuser.Status == 0 {
+		Engine.Logger.Sugar().Debugf("用户禁用[%s]-[%s]-状态[%d]", userInfo.Username, userInfo.Password, dbuser.Status)
+		util.ReturnError(util.APIErrorUserDeny, "用户禁用", w, r)
+		return
+	}
+
+	encodeText := "cqset123"
+	cipher := goencrypt.NewDESCipher([]byte(encodeText), []byte(""), goencrypt.ECBMode, goencrypt.Pkcs7, goencrypt.PrintBase64)
+	cipherText, err := cipher.DESEncrypt([]byte(userInfo.Password))
+	if err != nil {
+		Engine.Error(err.Error())
+		util.ReturnError(util.APIErrorInternal, "内部错误", w, r)
+		return
+	}
+	if cipherText != dbuser.Pwd {
+		util.ReturnError(util.APIErrorUserPwdError, "密码错误", w, r)
+		return
+	}
+	tokenString, err := util.GenToken(dbuser.Name, dbuser.ID)
+	if err != nil {
+		util.ReturnError(util.APIErrorUserTokenInvalid, "无效token", w, r)
+		return
+	}
+
+	dbuser.LoginTime = time.Now()
+	err = Engine.DB.Model(&model.User{}).Where("id = ?", dbuser.ID).Update("login_time", time.Now()).Error
+	if err != nil {
+		Engine.Error(err.Error())
+	}
+	util.ReturnValue(map[string]interface{}{"user": userInfo.Username, "time": dbuser.LoginTime.Format(time.DateTime), "token": tokenString}, w, r)
+}
+
+func (conf *GlobalConfig) API_user_register(w http.ResponseWriter, r *http.Request) {
+	type userinfo struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		Engine.Error(err.Error())
+		util.ReturnError(util.APIErrorInternal, "内部错误", w, r)
+		return
+	}
+	userInfo := userinfo{}
+	if err = json.Unmarshal(raw, &userInfo); err != nil {
+		Engine.Error(err.Error())
+		util.ReturnError(util.APIErrorInternal, "内部错误", w, r)
+		return
+	}
+
+	if userInfo.Username == "" || userInfo.Password == "" {
+		util.ReturnError(util.APIErrorUserEmpty, "用户名密码为空", w, r)
+		return
+	}
+
+	encodeText := "cqset123"
+	cipher := goencrypt.NewDESCipher([]byte(encodeText), []byte(""), goencrypt.ECBMode, goencrypt.Pkcs7, goencrypt.PrintBase64)
+	password, err := cipher.DESEncrypt([]byte(userInfo.Password))
+	if err != nil {
+		Engine.Error(err.Error())
+		util.ReturnError(util.APIErrorInternal, "内部错误", w, r)
+		return
+	}
+
+	err = Engine.DB.Create(&model.User{
+		Name:       userInfo.Username,
+		SystemName: "",
+		NickName:   "",
+		Phone:      "",
+		Email:      "",
+		Pwd:        password,
+		Token:      "",
+		Openid:     "",
+		Oname:      "",
+		Status:     1,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}).Error
+	if err != nil {
+		Engine.Error(err.Error())
+		util.ReturnError(util.APIErrorInternal, "内部错误", w, r)
+		return
+	}
+	util.ReturnOK(w, r)
 }

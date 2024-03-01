@@ -50,8 +50,8 @@ func (config *HTTP) Handle(path string, f http.Handler) {
 		f = util.CORS(f)
 	}
 	if config.UserName != "" && config.Password != "" {
-		f = util.BasicAuth(config.UserName, config.Password, f)
-		//f = util.CheckToken(f)
+		//f = util.BasicAuth(config.UserName, config.Password, f)
+		f = util.CheckToken(f)
 	}
 	for _, middleware := range config.middlewares {
 		f = middleware(path, f)
@@ -69,6 +69,7 @@ func (config *HTTP) Handler(r *http.Request) (h http.Handler, pattern string) {
 
 // ListenAddrs Listen http and https
 func (config *HTTP) Listen(ctx context.Context) error {
+
 	if config.mux == nil {
 		return nil
 	}

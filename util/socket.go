@@ -44,6 +44,14 @@ const (
 	APIErrorOpen
 )
 
+const (
+	APIErrorUserPwd          = iota + 1000 // 用户账号密码错误
+	APIErrorUserDeny                       // 用户禁用
+	APIErrorUserPwdError                   // 用户密码错误
+	APIErrorUserTokenInvalid               // 用户无效token
+	APIErrorUserEmpty                      // 用户名密码为空
+)
+
 type APIError struct {
 	Code    int    `json:"code"`
 	Message string `json:"msg"`
@@ -64,8 +72,9 @@ func ReturnOK(rw http.ResponseWriter, r *http.Request) {
 }
 
 func ReturnError(code int, msg string, rw http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	isJson := query.Get("format") == "json"
+	//query := r.URL.Query()
+	//isJson := query.Get("format") == "json"
+	isJson := true
 	if isJson {
 		if err := json.NewEncoder(rw).Encode(APIError{code, msg}); err != nil {
 			json.NewEncoder(rw).Encode(APIError{
@@ -140,7 +149,8 @@ func ReturnFetchList[T any](fetch func() []T, rw http.ResponseWriter, r *http.Re
 func ReturnFetchValue[T any](fetch func() T, rw http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	isYaml := query.Get("format") == "yaml"
-	isJson := query.Get("format") == "json"
+	//isJson := query.Get("format") == "json"
+	isJson := true
 	tickDur, err := time.ParseDuration(query.Get("interval"))
 	if err != nil {
 		tickDur = time.Second
@@ -264,9 +274,28 @@ func BasicAuth(u, p string, next http.Handler) http.Handler {
 	})
 }
 
+// HasString 检查字符串数组中是否有指定的值
+func HasString(items []string, item string) bool {
+	for _, eachItem := range items {
+		if eachItem == item {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckToken 校验token
 func CheckToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		path := []string{
+			"/api/user/login",
+		}
+		if HasString(path, r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		token := r.Header.Get("token")
 		if token == "" {
 			ret := APIError{http.StatusUnauthorized, "Unauthorized"}
