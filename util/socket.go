@@ -52,6 +52,10 @@ const (
 	APIErrorUserEmpty                      // 用户名密码为空
 )
 
+const (
+	APIErrorPresentList = iota + 2000 // 预置点列表错误
+)
+
 type APIError struct {
 	Code    int    `json:"code"`
 	Message string `json:"msg"`
@@ -298,12 +302,15 @@ func CheckToken(next http.Handler) http.Handler {
 
 		token := r.Header.Get("token")
 		if token == "" {
-			ret := APIError{http.StatusUnauthorized, "Unauthorized"}
-			raw, _ := json.Marshal(ret)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			io.WriteString(w, string(raw))
-			return
+			token = r.URL.Query().Get("token")
+			if token == "" {
+				ret := APIError{http.StatusUnauthorized, "Unauthorized"}
+				raw, _ := json.Marshal(ret)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				io.WriteString(w, string(raw))
+				return
+			}
 		}
 		mc, err := ParseToken(token)
 		if err != nil {

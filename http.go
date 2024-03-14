@@ -356,36 +356,6 @@ func (conf *GlobalConfig) API_replay_mp4(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-func (conf *GlobalConfig) API_insertSEI(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	streamPath := q.Get("streamPath")
-	s := Streams.Get(streamPath)
-	if s == nil {
-		util.ReturnError(util.APIErrorNoStream, NO_SUCH_STREAM, w, r)
-		return
-	}
-	t := q.Get("type")
-	tb, err := strconv.ParseInt(t, 10, 8)
-	if err != nil {
-		if t == "" {
-			tb = 5
-		} else {
-			util.ReturnError(util.APIErrorQueryParse, "type must a number", w, r)
-			return
-		}
-	}
-	sei, err := io.ReadAll(r.Body)
-	if err == nil {
-		if s.Tracks.AddSEI(byte(tb), sei) {
-			util.ReturnOK(w, r)
-		} else {
-			util.ReturnError(util.APIErrorNoSEI, "no sei track", w, r)
-		}
-	} else {
-		util.ReturnError(util.APIErrorNoBody, err.Error(), w, r)
-	}
-}
-
 // API_user_login 用户登录
 func (conf *GlobalConfig) API_user_login(w http.ResponseWriter, r *http.Request) {
 
